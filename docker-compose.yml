@@ -1,0 +1,56 @@
+services:
+  mongo:
+    image: mongo:7
+    # Transactions and change streams need a replica set — even a
+    # single-node one. The init container below runs rs.initiate() once.
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    environment:
+      # Demo-only credentials. Never reuse them outside this lab.
+      MONGO_INITDB_ROOT_USERNAME: mongoadmin
+      MONGO_INITDB_ROOT_PASSWORD: mongopassword
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodata:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh -u mongoadmin -p mongopassword --quiet --eval 'db.adminCommand(\"ping\")'"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mongo-init:
+    image: mongo:7
+    depends_on:
+      mongo:
+        condition: service_healthy
+    # Idempotent: rs.initiate() is a no-op once the set exists, and the
+    # retry loop covers the window where mongod accepts connections but
+    # the replica set isn't ready yet.
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        for i in $(seq 1 30); do
+          if mongosh -u mongoadmin -p mongopassword --host mongo --quiet --eval 'rs.initiate({_id: "rs0", members: [{_id: 0, host: "mongo:27017"}]})' 2>&1 | grep -qiE 'ok|already'; then
+            echo "Replica set rs0 initiated."
+            exit 0
+          fi
+          sleep 2
+        done
+        echo "Failed to initiate replica set." >&2
+        exit 1
+
+  api:
+    build:
+      context: src/MongoDemo
+      dockerfile: Dockerfile
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ConnectionStrings__MongoDb: mongodb://mongoadmin:mongopassword@mongo:27017/mongodemo?replicaSet=rs0&authSource=admin
+    ports:
+      - "8080:8080"
+    depends_on:
+      mongo-init:
+        condition: service_completed_successfully
+
+volumes:
+  mongodata:
